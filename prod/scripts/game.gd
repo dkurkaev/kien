@@ -248,11 +248,8 @@ func _build_sponge() -> void:
 
 func _show_sponge(si: int, cx: float, cy: float, ang: float) -> void:
 	var s: Surface = surfaces[si]
-	# keep the whole sponge inside the surface (never past the walls)
-	var mx := minf(5.5, float(s.gW) * 0.5)
-	var my := minf(5.5, float(s.gH) * 0.5)
-	cx = clampf(cx, mx, float(s.gW) - mx)
-	cy = clampf(cy, my, float(s.gH) - my)
+	# no dead zone: the sponge follows the cursor right to the edge (cx/cy are already
+	# clamped to the surface bounds); a slight overhang at the rim is natural
 	# long axis follows the wipe heading; short axis and up complete the basis
 	var uu: Vector3 = s.u * cos(ang) + s.v * sin(ang)
 	var vv: Vector3 = -s.u * sin(ang) + s.v * cos(ang)
@@ -331,11 +328,8 @@ func _build_broom() -> void:
 
 func _show_broom(cx: float, cy: float, ang: float) -> void:
 	var s: Surface = surfaces[0]
-	# keep the whole brush inside the counter (never past the walls)
-	var mx := minf(4.5, float(s.gW) * 0.5)
-	var my := minf(4.5, float(s.gH) * 0.5)
-	cx = clampf(cx, mx, float(s.gW) - mx)
-	cy = clampf(cy, my, float(s.gH) - my)
+	# no dead zone: the brush follows the cursor right to the counter edge
+	# (cx/cy are already clamped to the surface bounds)
 	# broad face (local +Z) turns to face the sweep direction; stands up on the surface
 	var zc: Vector3 = s.u * cos(ang) + s.v * sin(ang)
 	var yc: Vector3 = s.normal
@@ -658,28 +652,67 @@ func _pick(screen_pos: Vector2) -> Dictionary:
 			best = {"si": si, "cx": cc.x, "cy": cc.y, "world": hit}
 	return best
 
+# Like _pick, but never empty: if the cursor is outside every surface it returns the
+# nearest point CLAMPED to a valid surface, so the tool cursor always stays over the
+# scene. Broom is restricted to the counter (surface 0); cloth/spray use any surface.
+func _pick_for_cursor(screen_pos: Vector2) -> Dictionary:
+	var ro: Vector3 = camera.project_ray_origin(screen_pos)
+	var rd: Vector3 = camera.project_ray_normal(screen_pos)
+	var counter_only: bool = tools.current == "broom"
+	var best_in := {}
+	var best_in_d: float = INF
+	var best_cl := {}
+	var best_cl_d: float = INF
+	for si in surfaces.size():
+		if counter_only and si != 0:
+			continue
+		var s: Surface = surfaces[si]
+		var pl := Plane(s.normal, s.normal.dot(s.origin))
+		var hit = pl.intersects_ray(ro, rd)
+		if hit == null:
+			continue
+		var cc: Vector2 = s.from_world(hit)
+		var in_bounds: bool = cc.x >= 0.0 and cc.x <= s.gW and cc.y >= 0.0 and cc.y <= s.gH
+		var ccx: float = clampf(cc.x, 0.0, float(s.gW))
+		var ccy: float = clampf(cc.y, 0.0, float(s.gH))
+		var wp: Vector3 = s.to_world(ccx, ccy)
+		var d: float = ro.distance_to(wp)
+		if in_bounds and d < best_in_d:
+			best_in_d = d
+			best_in = {"si": si, "cx": ccx, "cy": ccy, "world": wp}
+		if d < best_cl_d:
+			best_cl_d = d
+			best_cl = {"si": si, "cx": ccx, "cy": ccy, "world": wp}
+	return best_in if not best_in.is_empty() else best_cl
+
 func _now() -> float:
 	return Time.get_ticks_msec() / 1000.0
 
 func _on_down(screen_pos: Vector2) -> void:
 	_active = true
 	_spraying = tools.current == "spray"
+	# the tool cursor always follows the clamped (in-scene) position
+	var vis := _pick_for_cursor(screen_pos)
+	if not vis.is_empty():
+		show_cursor(vis["si"], vis["cx"], vis["cy"], tools.current)
+	# interaction only where the pointer is genuinely over a surface
 	var p := _pick(screen_pos)
 	if p.is_empty():
 		_has_last = false
 		return
 	_set_last(p)
-	show_cursor(p["si"], p["cx"], p["cy"], tools.current)
 	if not tools.is_busy():
 		interactions.apply_segment(tools.current, p["si"], p["cx"], p["cy"], p["cx"], p["cy"], false, 0.0)
 
 func _on_move(screen_pos: Vector2) -> void:
-	var cur := _pick(screen_pos)
-	if cur.is_empty():
+	# tool cursor never disappears: it tracks the clamped, in-scene position
+	var vis := _pick_for_cursor(screen_pos)
+	if vis.is_empty():
 		hide_cursor()
 	else:
-		show_cursor(cur["si"], cur["cx"], cur["cy"], tools.current)
+		show_cursor(vis["si"], vis["cx"], vis["cy"], tools.current)
 
+	var cur := _pick(screen_pos)
 	if not _active:
 		return
 	if cur.is_empty():
