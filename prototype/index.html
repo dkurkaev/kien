@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Kiến — прототип</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #14110e; }
+      #app { position: fixed; inset: 0; touch-action: none; }
+      canvas { display: block; }
+
+      #hud {
+        position: fixed; left: 0; right: 0; bottom: 0;
+        display: flex; gap: 8px; justify-content: center; align-items: flex-end;
+        padding: 12px; pointer-events: none;
+        font: 13px/1.3 ui-sans-serif, system-ui, -apple-system, sans-serif;
+        color: #e9e2d6; user-select: none;
+      }
+      .tool {
+        pointer-events: auto; cursor: pointer;
+        min-width: 84px; padding: 8px 10px; border-radius: 10px;
+        background: rgba(30,26,21,.72); border: 1px solid rgba(255,255,255,.08);
+        text-align: center; backdrop-filter: blur(6px);
+        transition: transform .08s ease, background .12s ease, border-color .12s ease;
+      }
+      .tool small { display: block; opacity: .55; font-size: 11px; margin-top: 2px; }
+      .tool.active { background: rgba(206,158,74,.22); border-color: rgba(206,158,74,.7); }
+      .tool.switching { opacity: .5; }
+      #hint {
+        position: fixed; top: 10px; left: 10px; max-width: 340px;
+        font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; color: #b9b0a2;
+        background: rgba(20,17,14,.6); padding: 8px 10px; border-radius: 8px;
+        pointer-events: none; user-select: none;
+      }
+      #hint b { color: #e9e2d6; }
+      #err {
+        position: fixed; top: 0; left: 0; right: 0; display: none;
+        padding: 10px 14px; background: #5a1717; color: #ffd9d9;
+        font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; z-index: 99;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hint">
+      <b>Kiến</b> — прототип жеста уборки.<br />
+      Проводи мышью/пальцем по поверхности — это мазок.<br />
+      <b>1</b> тряпка · <b>2</b> спрей · <b>3</b> веник · <b>H</b> тепловая карта · <b>G</b> панель тюнинга
+    </div>
+    <div id="hud"></div>
+    <div id="err"></div>
+    <script>
+      // surface runtime errors instead of silently freezing the scene
+      function showErr(msg) {
+        const el = document.getElementById('err');
+        el.textContent = String(msg);
+        el.style.display = 'block';
+      }
+      window.addEventListener('error', (e) => showErr((e.error && e.error.stack) || e.message));
+      window.addEventListener('unhandledrejection', (e) => showErr('PROMISE: ' + ((e.reason && e.reason.stack) || e.reason)));
+    </script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

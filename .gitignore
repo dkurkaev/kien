@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Node / Vite prototype
+prototype/node_modules/
+prototype/dist/
+
+# Godot import cache (regenerated on open)
+.godot/
