@@ -6,6 +6,7 @@ const CURSOR_SHADER := preload("res://shaders/cursor.gdshader")
 const OVERLAY_SHADER := preload("res://shaders/liquid.gdshader")
 const MARBLE_SHADER := preload("res://shaders/marble.gdshader")
 const TILE_SHADER := preload("res://shaders/tile.gdshader")
+const SPONGE_SHADER := preload("res://shaders/sponge.gdshader")
 
 const SURFACE_COLORS := [Color8(0xcd, 0xbf, 0xa6), Color8(0xe6, 0xdc, 0xc7), Color8(0xd8, 0xcb, 0xb2)]
 const TOOL_TINTS := {
@@ -25,6 +26,8 @@ var interactions: Interactions
 var camera: Camera3D
 var surfaces: Array          # Array[Surface]
 var cursor_meshes: Array[MeshInstance3D] = []
+var sponge: Node3D           # 3D sponge shown for the cloth tool
+var _sponge_angle := 0.0     # heading (rad, in surface u/v) the sponge points along
 var heat_meshes: Array[MeshInstance3D] = []
 var heat_tex: Array[ImageTexture] = []
 var heat_data: Array[PackedByteArray] = []
@@ -57,6 +60,7 @@ func _ready() -> void:
 	_build_decor()
 	_build_surfaces()
 	_build_cursor()
+	_build_sponge()
 
 	hud = Hud.new(tools)
 	add_child(hud)
@@ -182,6 +186,56 @@ func _build_surfaces() -> void:
 		add_child(hmi)
 		heat_meshes.append(hmi)
 
+func _build_sponge() -> void:
+	# two stacked layers: soft yellow foam + coarse green scour pad (see reference)
+	sponge = Node3D.new()
+	var L := 1.25
+	var W := 0.66
+	var fh := 0.20   # foam thickness
+	var ph := 0.09   # pad thickness
+
+	var fm := BoxMesh.new()
+	fm.size = Vector3(L, fh, W)
+	var fmat := ShaderMaterial.new()
+	fmat.shader = SPONGE_SHADER
+	fmat.set_shader_parameter("base_color", Color(0.93, 0.80, 0.15))
+	fmat.set_shader_parameter("pore_scale", 17.0)
+	fmat.set_shader_parameter("roughness_v", 0.93)
+	fmat.set_shader_parameter("bump", 0.7)
+	fmat.set_shader_parameter("pore_depth", 0.5)
+	var fmi := MeshInstance3D.new()
+	fmi.mesh = fm
+	fmi.material_override = fmat
+	fmi.position = Vector3(0, fh * 0.5, 0)
+	sponge.add_child(fmi)
+
+	var pm := BoxMesh.new()
+	pm.size = Vector3(L * 0.94, ph, W * 0.94)
+	var pmat := ShaderMaterial.new()
+	pmat.shader = SPONGE_SHADER
+	pmat.set_shader_parameter("base_color", Color(0.15, 0.30, 0.14))
+	pmat.set_shader_parameter("pore_scale", 42.0)
+	pmat.set_shader_parameter("roughness_v", 0.98)
+	pmat.set_shader_parameter("bump", 1.0)
+	pmat.set_shader_parameter("pore_depth", 0.35)
+	var pmi := MeshInstance3D.new()
+	pmi.mesh = pm
+	pmi.material_override = pmat
+	pmi.position = Vector3(0, fh + ph * 0.5, 0)
+	sponge.add_child(pmi)
+
+	sponge.visible = false
+	add_child(sponge)
+
+func _show_sponge(si: int, cx: float, cy: float) -> void:
+	var s: Surface = surfaces[si]
+	var a: float = _sponge_angle
+	# long axis follows the wipe heading; short axis and up complete the basis
+	var uu: Vector3 = s.u * cos(a) + s.v * sin(a)
+	var vv: Vector3 = -s.u * sin(a) + s.v * cos(a)
+	sponge.transform = Transform3D(Basis(uu, s.normal, vv), s.to_world(cx, cy) + s.normal * 0.006)
+	sponge.visible = true
+
 func _build_cursor() -> void:
 	for si in surfaces.size():
 		var s: Surface = surfaces[si]
@@ -208,6 +262,10 @@ func _build_cursor() -> void:
 
 func show_cursor(si: int, cx: float, cy: float, tool: String) -> void:
 	hide_cursor()
+	# cloth shows the 3D sponge instead of the flat brush disc
+	if tool == "cloth":
+		_show_sponge(si, cx, cy)
+		return
 	var world_r: float = Config.spray_range if tool == "spray" else Config.swipe_width
 	var range_cells: float = world_r / Config.world_cell_size
 	var tint: Color = TOOL_TINTS[tool]
@@ -223,6 +281,8 @@ func show_cursor(si: int, cx: float, cy: float, tool: String) -> void:
 func hide_cursor() -> void:
 	for mi in cursor_meshes:
 		mi.visible = false
+	if sponge:
+		sponge.visible = false
 
 # ---------------------------------------------------------------- heatmap
 
@@ -328,6 +388,13 @@ func _on_move(screen_pos: Vector2) -> void:
 	var world_dist: float = prev_world.distance_to(cur["world"])
 	var speed: float = world_dist / dt
 	var fast: bool = speed > Config.swipe_fast_threshold
+	# turn the sponge to face the wipe direction (in this surface's cell space)
+	var mdx: float = cur["cx"] - prev_cx
+	var mdy: float = cur["cy"] - prev_cy
+	if mdx * mdx + mdy * mdy > 0.02:
+		_sponge_angle = atan2(mdy, mdx)
+		if tools.current == "cloth":
+			show_cursor(cur["si"], cur["cx"], cur["cy"], "cloth")
 	interactions.apply_segment(tools.current, cur["si"], prev_cx, prev_cy, cur["cx"], cur["cy"], fast, speed)
 
 func _set_last(p: Dictionary) -> void:
