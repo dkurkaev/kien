@@ -688,6 +688,10 @@ func _pick_for_cursor(screen_pos: Vector2) -> Dictionary:
 func _now() -> float:
 	return Time.get_ticks_msec() / 1000.0
 
+# ortho zoom: smaller camera.size = closer. Clamped so the scene can't invert/vanish.
+func _zoom(factor: float) -> void:
+	camera.size = clampf(camera.size * factor, 5.0, 30.0)
+
 func _on_down(screen_pos: Vector2) -> void:
 	_active = true
 	_spraying = tools.current == "spray"
@@ -755,7 +759,11 @@ func _on_up() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
-		if event.button_index == MOUSE_BUTTON_LEFT:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
+			_zoom(1.0 / 1.1)          # wheel up = zoom in
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
+			_zoom(1.1)                # wheel down = zoom out
+		elif event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
 				_on_down(event.position)
 			else:
