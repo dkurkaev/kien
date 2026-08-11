@@ -37,16 +37,27 @@ func apply_segment(tool: String, si: int, ax: float, ay: float, bx: float, by: f
 	var steps: int = maxi(1, int(ceil(seg_len / 2.0)))
 
 	if tool == "cloth":
+		# a wet cloth ALWAYS drags liquid along its motion (smear) and absorbs some
+		# (erase). Sharp/fast strokes drag more and clean less; slow strokes clean.
+		# per-step displacement (coarse cells) is the cloth velocity for the smear.
+		var sdx: float = (bx - ax) / float(steps)
+		var sdy: float = (by - ay) / float(steps)
+		# smooth blend (no hard threshold): drag scales up with speed, clean scales
+		# down. A sharp stroke is pure smear (streak isn't eaten by erase); a slow
+		# one pure clean. Sub-threshold-but-quick strokes still visibly smear.
+		var fast_frac: float = clampf(speed / maxf(1e-3, Config.swipe_fast_threshold), 0.0, 1.0)
+		var smear_str: float = 0.9 * fast_frac
+		var erase_str: float = 0.6 * (1.0 - fast_frac)
 		for k in range(0, steps + 1):
 			var t: float = float(k) / steps
 			var cx: float = ax + (bx - ax) * t
 			var cy: float = ay + (by - ay) * t
 			field.erase(si, cx, cy, Config.swipe_erase_radius / cs)
 			ants.scatter(si, cx, cy, Config.swipe_ant_scatter / cs, Config.swipe_ant_kill)
-			if fast:
-				messes.liquid.smear(si, cx, cy, w_cells, dx, dy, 0.5)
-			else:
-				messes.liquid.erase(si, cx, cy, w_cells, 0.6)
+			if smear_str > 0.0:
+				messes.liquid.smear(si, cx, cy, w_cells, sdx, sdy, smear_str)
+			if erase_str > 0.0:
+				messes.liquid.erase(si, cx, cy, w_cells, erase_str)
 	else:
 		# broom — crumbs only, and only on the counter
 		if si != 0:

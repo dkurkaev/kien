@@ -172,28 +172,44 @@ func erase(si: int, cx: float, cy: float, radius_cells: float, strength: float) 
 	wet[si] = g
 	_mark(si, x0, y0, x1, y1)
 
-func smear(si: int, cx: float, cy: float, radius_cells: float, dx: float, dy: float, strength: float) -> void:
+# Forward-scatter advection: move a fraction of each brushed cell's liquid to a
+# fractional point AHEAD (vx/vy = the stroke's per-step displacement in coarse
+# cells) and splat it bilinearly into the 4 surrounding cells. Mass is carried, not
+# faded, so a fast wipe drags the spill into a trailing streak; the bilinear splat
+# keeps it smooth instead of jumping by whole grid cells. strength = how much follows.
+func smear(si: int, cx: float, cy: float, radius_cells: float, vx: float, vy: float, strength: float) -> void:
 	var fw: int = fgW[si]; var fh: int = fgH[si]
-	var g: PackedFloat32Array = wet[si]
-	var sx: int = int(round(dx * LIQ)); var sy: int = int(round(dy * LIQ))
+	var src: PackedFloat32Array = wet[si].duplicate()   # amounts to move (snapshot)
+	var g: PackedFloat32Array = wet[si]                 # accumulate into the live field
 	var fcx: float = cx * LIQ; var fcy: float = cy * LIQ
 	var R: float = radius_cells * LIQ; var r2: float = R * R
+	var fvx: float = vx * LIQ; var fvy: float = vy * LIQ
 	var x0: int = maxi(0, int(floor(fcx - R))); var x1: int = mini(fw - 1, int(ceil(fcx + R)))
 	var y0: int = maxi(0, int(floor(fcy - R))); var y1: int = mini(fh - 1, int(ceil(fcy + R)))
 	for y in range(y0, y1 + 1):
 		for x in range(x0, x1 + 1):
 			var ox: float = x - fcx; var oy: float = y - fcy
-			if ox * ox + oy * oy > r2:
+			var d2: float = ox * ox + oy * oy
+			if d2 > r2:
 				continue
-			var tx: int = x + sx; var ty: int = y + sy
-			if tx < 0 or tx >= fw or ty < 0 or ty >= fh:
+			var moved: float = src[y * fw + x] * strength * (1.0 - d2 / r2)
+			if moved <= 0.0:
 				continue
-			var i: int = y * fw + x
-			var moved: float = g[i] * strength
-			g[i] -= moved
-			g[ty * fw + tx] = minf(1.6, g[ty * fw + tx] + moved)
+			g[y * fw + x] -= moved
+			# bilinear splat at the forward position
+			var tx: float = x + fvx; var ty: float = y + fvy
+			var tx0: int = int(floor(tx)); var ty0: int = int(floor(ty))
+			var rx: float = tx - tx0; var ry: float = ty - ty0
+			var ax0: int = clampi(tx0, 0, fw - 1); var ax1: int = clampi(tx0 + 1, 0, fw - 1)
+			var ay0: int = clampi(ty0, 0, fh - 1); var ay1: int = clampi(ty0 + 1, 0, fh - 1)
+			g[ay0 * fw + ax0] = minf(1.6, g[ay0 * fw + ax0] + moved * (1.0 - rx) * (1.0 - ry))
+			g[ay0 * fw + ax1] = minf(1.6, g[ay0 * fw + ax1] + moved * rx * (1.0 - ry))
+			g[ay1 * fw + ax0] = minf(1.6, g[ay1 * fw + ax0] + moved * (1.0 - rx) * ry)
+			g[ay1 * fw + ax1] = minf(1.6, g[ay1 * fw + ax1] + moved * rx * ry)
 	wet[si] = g
-	_mark(si, mini(x0, x0 + sx), mini(y0, y0 + sy), maxi(x1, x1 + sx), maxi(y1, y1 + sy))
+	# dirty rect must also cover where liquid was thrown forward
+	var mx: int = int(ceil(absf(fvx))) + 1; var my: int = int(ceil(absf(fvy))) + 1
+	_mark(si, maxi(0, x0 - mx), maxi(0, y0 - my), mini(fw - 1, x1 + mx), mini(fh - 1, y1 + my))
 
 # sampled at the COARSE resolution (called every frame by the ant influx)
 func food_amount() -> float:
