@@ -10,7 +10,7 @@ var world_floor_y: float = -0.62      # crumbs swept off the edge vanish below t
 
 # --- pheromone ---
 var ph_evaporation: float = 0.55      # per-second decay
-var ph_diffusion: float = 0.08        # light blur per step
+var ph_diffusion: float = 0.22        # blur per step -> gradient halo around sources
 var ph_ant_deposit: float = 6.0
 var ph_food_strength: float = 90.0
 var ph_max: float = 100.0

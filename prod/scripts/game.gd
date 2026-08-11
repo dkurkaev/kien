@@ -60,6 +60,9 @@ var _last_cx := 0.0
 var _last_cy := 0.0
 var _last_world := Vector3.ZERO
 var _last_time := 0.0
+var _last_screen := Vector2.ZERO   # last pointer position (for re-showing on tool switch)
+var _have_screen := false
+var _prev_tool := "cloth"
 
 func _ready() -> void:
 	randomize()
@@ -631,6 +634,16 @@ func _process(delta: float) -> void:
 		_spray_overlay.visible = tools.current == "spray"
 	if foam:
 		foam.emitting = _spraying and tools.current == "spray"
+	# on a tool switch (keys/HUD, no mouse move) re-show the new tool at the last
+	# cursor position immediately, instead of waiting for the next move
+	if tools.current != _prev_tool:
+		_prev_tool = tools.current
+		if _have_screen:
+			var vis := _pick_for_cursor(_last_screen)
+			if vis.is_empty():
+				hide_cursor()
+			else:
+				show_cursor(vis["si"], vis["cx"], vis["cy"], tools.current)
 	# a tool switch (keys/HUD, without moving the mouse) must drop the old tool model
 	if _tool_kind != "" and _tool_kind != tools.current:
 		_tool_kind = ""
@@ -717,6 +730,8 @@ func _zoom(factor: float) -> void:
 
 func _on_down(screen_pos: Vector2) -> void:
 	_active = true
+	_last_screen = screen_pos
+	_have_screen = true
 	_spraying = tools.current == "spray"
 	# the tool cursor always follows the clamped (in-scene) position
 	var vis := _pick_for_cursor(screen_pos)
@@ -732,6 +747,8 @@ func _on_down(screen_pos: Vector2) -> void:
 		interactions.apply_segment(tools.current, p["si"], p["cx"], p["cy"], p["cx"], p["cy"], false, 0.0)
 
 func _on_move(screen_pos: Vector2) -> void:
+	_last_screen = screen_pos
+	_have_screen = true
 	# tool cursor never disappears: it tracks the clamped, in-scene position
 	var vis := _pick_for_cursor(screen_pos)
 	if vis.is_empty():

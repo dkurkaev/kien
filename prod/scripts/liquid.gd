@@ -303,11 +303,20 @@ func update(dt: float, field: Field) -> void:
 			var img := Image.create_from_data(fw, fgH[si], false, Image.FORMAT_RG8, data)
 			_tex[si].update(img)
 
-		# food radiates from wet cells (coarse sim resolution)
+		# food radiates from wet cells. Average the fine field over each coarse cell so
+		# partial coverage deposits proportionally (a soft source edge, not a hard
+		# stamp); the field's diffusion then spreads it into the gradient ants follow.
 		var wf: PackedFloat32Array = wet[si]
-		var half: int = LIQ / 2
+		var inv: float = 1.0 / float(LIQ * LIQ)
 		for gy in s.gH:
+			var frow: int = gy * LIQ
 			for gx in s.gW:
-				var v: float = wf[(gy * LIQ + half) * fw + (gx * LIQ + half)]
-				if v > 0.05 and not field.no_food_at(si, gx, gy):
+				var acc: float = 0.0
+				var fbase: int = frow * fw + gx * LIQ
+				for yy in LIQ:
+					var rb: int = fbase + yy * fw
+					for xx in LIQ:
+						acc += wf[rb + xx]
+				var v: float = acc * inv
+				if v > 0.02 and not field.no_food_at(si, gx, gy):
 					field.deposit(si, gx, gy, Config.ph_food_strength * minf(1.0, v) * 0.05 * dt)
