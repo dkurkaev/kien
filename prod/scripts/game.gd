@@ -28,6 +28,12 @@ var surfaces: Array          # Array[Surface]
 var cursor_meshes: Array[MeshInstance3D] = []
 var sponge: Node3D           # 3D sponge shown for the cloth tool
 var _sponge_angle := 0.0     # heading (rad, in surface u/v) the sponge points along
+var spray_bottle: Node3D     # held spray bottle, drawn in an on-top overlay world
+var foam: CPUParticles3D     # white foam puff from the nozzle while spraying
+var _spray_vp: SubViewport   # overlay viewport so the bottle never clips the scene
+var _spray_overlay: SubViewportContainer
+var _bottle_rot: Basis       # FIXED bottle orientation (never rotates with the cursor)
+var _spraying := false
 var heat_meshes: Array[MeshInstance3D] = []
 var heat_tex: Array[ImageTexture] = []
 var heat_data: Array[PackedByteArray] = []
@@ -61,6 +67,7 @@ func _ready() -> void:
 	_build_surfaces()
 	_build_cursor()
 	_build_sponge()
+	_build_spray_bottle()
 
 	hud = Hud.new(tools)
 	add_child(hud)
@@ -236,6 +243,162 @@ func _show_sponge(si: int, cx: float, cy: float) -> void:
 	sponge.transform = Transform3D(Basis(uu, s.normal, vv), s.to_world(cx, cy) + s.normal * 0.006)
 	sponge.visible = true
 
+func _bottle_part(parent: Node3D, mesh: Mesh, mat: Material, pos: Vector3,
+		rx := 0.0, ry := 0.0, rz := 0.0, scl := Vector3.ONE) -> void:
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var b := Basis.from_euler(Vector3(deg_to_rad(rx), deg_to_rad(ry), deg_to_rad(rz))).scaled(scl)
+	mi.transform = Transform3D(b, pos)
+	parent.add_child(mi)
+
+func _build_spray_bottle() -> void:
+	# The bottle lives in a separate overlay viewport drawn ON TOP of the scene, so
+	# it is never occluded by walls/floor — it is "outside" the kitchen space but
+	# still tracks the cursor (its camera is a clone of the main one).
+	_spray_overlay = SubViewportContainer.new()
+	_spray_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_spray_overlay.stretch = true
+	_spray_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_spray_overlay.visible = false      # only rendered while the spray tool is active
+	add_child(_spray_overlay)
+	_spray_vp = SubViewport.new()
+	_spray_vp.transparent_bg = true
+	_spray_vp.own_world_3d = true       # isolated world: only the bottle + its lights
+	_spray_vp.handle_input_locally = false
+	_spray_vp.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE
+	_spray_overlay.add_child(_spray_vp)
+	var oc := Camera3D.new()
+	oc.projection = camera.projection
+	oc.size = camera.size
+	oc.near = camera.near
+	oc.far = camera.far
+	oc.keep_aspect = camera.keep_aspect
+	oc.transform = camera.transform
+	_spray_vp.add_child(oc)
+	# two lights (no environment, so the viewport stays transparent) light the bottle
+	var key := DirectionalLight3D.new()
+	key.light_energy = 1.05
+	key.shadow_enabled = false
+	_spray_vp.add_child(key)
+	key.look_at_from_position(Vector3(-9, 12, -3), Vector3(1, 0, 1), Vector3.UP)
+	var fill := DirectionalLight3D.new()
+	fill.light_energy = 0.5
+	fill.light_color = Color(0.85, 0.9, 1.0)
+	fill.shadow_enabled = false
+	_spray_vp.add_child(fill)
+	fill.look_at_from_position(Vector3(6, 6, -10), Vector3(0, 0, 1), Vector3.UP)
+
+	var white := StandardMaterial3D.new()
+	white.albedo_color = Color(0.95, 0.95, 0.96); white.roughness = 0.3; white.metallic = 0.0
+	var red := StandardMaterial3D.new()
+	red.albedo_color = Color(0.86, 0.12, 0.10); red.roughness = 0.28
+	var yellow := StandardMaterial3D.new()
+	yellow.albedo_color = Color(0.98, 0.82, 0.13); yellow.roughness = 0.45
+	var dark := StandardMaterial3D.new()
+	dark.albedo_color = Color(0.14, 0.14, 0.16); dark.roughness = 0.5
+
+	var b := Node3D.new()
+	var flat := Vector3(1.0, 1.0, 0.62)   # squash the round meshes into an oval bottle
+
+	var body := CylinderMesh.new()
+	body.top_radius = 0.82; body.bottom_radius = 0.92; body.height = 3.4; body.radial_segments = 28
+	_bottle_part(b, body, white, Vector3(0, 1.7, 0), 0, 0, 0, flat)
+	var lab := CylinderMesh.new()
+	lab.top_radius = 0.9; lab.bottom_radius = 0.97; lab.height = 1.15; lab.radial_segments = 28
+	_bottle_part(b, lab, yellow, Vector3(0, 0.95, 0), 0, 0, 0, Vector3(1.02, 1.0, 0.64))
+	var shoulder := CylinderMesh.new()
+	shoulder.top_radius = 0.4; shoulder.bottom_radius = 0.82; shoulder.height = 0.7; shoulder.radial_segments = 28
+	_bottle_part(b, shoulder, white, Vector3(0, 3.75, 0), 0, 0, 0, flat)
+	var neck := CylinderMesh.new()
+	neck.top_radius = 0.4; neck.bottom_radius = 0.4; neck.height = 0.45; neck.radial_segments = 20
+	_bottle_part(b, neck, white, Vector3(0, 4.25, 0))
+	var collar := CylinderMesh.new()
+	collar.top_radius = 0.52; collar.bottom_radius = 0.54; collar.height = 0.42; collar.radial_segments = 24
+	_bottle_part(b, collar, red, Vector3(0, 4.4, 0))
+
+	# trigger sprayer head (front = +Z)
+	var grip := BoxMesh.new(); grip.size = Vector3(0.72, 0.5, 1.05)
+	_bottle_part(b, grip, red, Vector3(0, 4.98, -0.35), 12, 0, 0)
+	var housing := BoxMesh.new(); housing.size = Vector3(0.86, 0.62, 1.5)
+	_bottle_part(b, housing, red, Vector3(0, 5.02, 0.5), -8, 0, 0)
+	var nozzle := CylinderMesh.new()
+	nozzle.top_radius = 0.12; nozzle.bottom_radius = 0.17; nozzle.height = 0.34; nozzle.radial_segments = 16
+	_bottle_part(b, nozzle, dark, Vector3(0, 5.06, 1.38), 90, 0, 0)   # axis Y -> +Z
+	var trigger := BoxMesh.new(); trigger.size = Vector3(0.44, 0.78, 0.22)
+	_bottle_part(b, trigger, red, Vector3(0, 4.5, 0.74), 24, 0, 0)
+
+	# white foam puff sprayed from the nozzle (+Z)
+	foam = CPUParticles3D.new()
+	foam.emitting = false
+	foam.amount = 60
+	foam.lifetime = 0.55
+	foam.local_coords = false
+	foam.amount = 46
+	foam.lifetime = 0.5
+	foam.direction = Vector3(0, 0, 1)
+	foam.spread = 44.0                 # cone tuned to fill the action disc, not overflow
+	foam.initial_velocity_min = 3.0
+	foam.initial_velocity_max = 5.0
+	foam.gravity = Vector3(0, -5.0, 0)   # foam actually reaches the surface, not floating above
+	foam.scale_amount_min = 0.5
+	foam.scale_amount_max = 1.1
+	foam.damping_min = 1.5
+	foam.damping_max = 3.5
+	var puff := SphereMesh.new()
+	puff.radius = 0.22; puff.height = 0.44; puff.radial_segments = 8; puff.rings = 4
+	var fmat := StandardMaterial3D.new()
+	fmat.albedo_color = Color(1.0, 1.0, 1.0)
+	fmat.roughness = 1.0
+	fmat.emission_enabled = true
+	fmat.emission = Color(0.9, 0.95, 1.0)
+	fmat.emission_energy_multiplier = 0.25
+	puff.material = fmat
+	foam.mesh = puff
+	var ramp := Gradient.new()
+	ramp.set_color(0, Color(1, 1, 1, 0.95))
+	ramp.set_color(1, Color(1, 1, 1, 0.0))
+	foam.color_ramp = ramp
+	fmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_spray_vp.add_child(foam)   # in the overlay world; aimed straight down into the disc
+
+	# one fixed pose (never changes, never clips): body upright with the cap on top,
+	# tilted forward so the nozzle (+Z) sprays down-into-the-scene. Camera is static.
+	var camh: Vector3 = Vector3(camera.global_position.x, 0.0, camera.global_position.z)
+	camh = camh.normalized() if camh.length() > 1e-3 else Vector3(0, 0, 1)
+	var into: Vector3 = -camh   # away from the camera, into the scene
+	var zc: Vector3 = (Vector3.DOWN * 0.72 + into * 0.6).normalized()   # nozzle: down + forward
+	var yc: Vector3 = (Vector3.UP - zc * Vector3.UP.dot(zc)).normalized()  # body up, cap on top
+	var xc: Vector3 = yc.cross(zc).normalized()
+	_bottle_rot = Basis(xc, yc, zc)
+
+	spray_bottle = b
+	spray_bottle.visible = false
+	_spray_vp.add_child(spray_bottle)   # positioned over the cursor in _show_spray_bottle
+
+const _BOTTLE_SCALE := 0.46
+const _NOZZLE_LOCAL := Vector3(0, 5.06, 1.45)   # nozzle position in the model
+
+func _show_spray_bottle(si: int, cx: float, cy: float) -> void:
+	var s: Surface = surfaces[si]
+	var p: Vector3 = s.to_world(cx, cy)
+	# only the POSITION tracks the cursor; orientation is the fixed pose. The bottle
+	# floats up and toward the camera (behind the disc) so the nozzle sprays
+	# forward-down into it; it never rotates or clips the scene.
+	var camh: Vector3 = Vector3(camera.global_position.x, 0.0, camera.global_position.z).normalized()
+	var noz_world: Vector3 = p + Vector3.UP * 1.3 + camh * 1.2
+	var noz_off: Vector3 = _bottle_rot * (_NOZZLE_LOCAL * _BOTTLE_SCALE)
+	spray_bottle.transform = Transform3D(_bottle_rot.scaled(Vector3(_BOTTLE_SCALE, _BOTTLE_SCALE, _BOTTLE_SCALE)), noz_world - noz_off)
+	spray_bottle.visible = true
+
+	# foam sprays from the nozzle straight down onto the cursor point (into the disc)
+	var fz: Vector3 = (p - noz_world).normalized()
+	var fx: Vector3 = Vector3.UP.cross(fz)
+	fx = fx.normalized() if fx.length() > 1e-4 else Vector3.RIGHT
+	var fy: Vector3 = fz.cross(fx).normalized()
+	foam.global_transform = Transform3D(Basis(fx, fy, fz), noz_world)
+
 func _build_cursor() -> void:
 	for si in surfaces.size():
 		var s: Surface = surfaces[si]
@@ -277,12 +440,17 @@ func show_cursor(si: int, cx: float, cy: float, tool: String) -> void:
 		mi.transform = Transform3D(_surface_basis(s).scaled(Vector3(world_r, world_r, world_r)), pos)
 		(mi.material_override as ShaderMaterial).set_shader_parameter("tint", tint)
 		mi.visible = true
+	# spray also floats the held bottle above the target (disc projection stays)
+	if tool == "spray" and spray_bottle:
+		_show_spray_bottle(si, cx, cy)
 
 func hide_cursor() -> void:
 	for mi in cursor_meshes:
 		mi.visible = false
 	if sponge:
 		sponge.visible = false
+	if spray_bottle:
+		spray_bottle.visible = false
 
 # ---------------------------------------------------------------- heatmap
 
@@ -322,6 +490,11 @@ func _process(_delta: float) -> void:
 	ants.sync_instances()
 	messes.sync_instances()
 	_update_heatmap()
+	# the on-top bottle overlay only renders for the spray tool; foam while spraying
+	if _spray_overlay:
+		_spray_overlay.visible = tools.current == "spray"
+	if foam:
+		foam.emitting = _spraying and tools.current == "spray"
 	if hud:
 		hud.set_stats(ants.alive_count(), messes.crumbs.alive_count(), Engine.get_frames_per_second())
 
@@ -352,6 +525,7 @@ func _now() -> float:
 
 func _on_down(screen_pos: Vector2) -> void:
 	_active = true
+	_spraying = tools.current == "spray"
 	var p := _pick(screen_pos)
 	if p.is_empty():
 		_has_last = false
@@ -408,6 +582,7 @@ func _set_last(p: Dictionary) -> void:
 func _on_up() -> void:
 	_active = false
 	_has_last = false
+	_spraying = false
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
