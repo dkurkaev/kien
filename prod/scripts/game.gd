@@ -248,13 +248,27 @@ func _build_sponge() -> void:
 
 func _show_sponge(si: int, cx: float, cy: float, ang: float) -> void:
 	var s: Surface = surfaces[si]
-	# no dead zone: the sponge follows the cursor right to the edge (cx/cy are already
-	# clamped to the surface bounds); a slight overhang at the rim is natural
+	# hard-clamp by the sponge's ACTUAL rotated footprint so the whole pad stays on
+	# this surface (never through the walls/floor). Margin depends on the angle, so
+	# there is no oversized dead zone.
+	var p := _clamp_footprint(s, cx, cy, ang, 0.625, 0.33)   # half length (uu) / width (vv)
 	# long axis follows the wipe heading; short axis and up complete the basis
 	var uu: Vector3 = s.u * cos(ang) + s.v * sin(ang)
 	var vv: Vector3 = -s.u * sin(ang) + s.v * cos(ang)
-	sponge.transform = Transform3D(Basis(uu, s.normal, vv), s.to_world(cx, cy) + s.normal * 0.006)
+	sponge.transform = Transform3D(Basis(uu, s.normal, vv), s.to_world(p.x, p.y) + s.normal * 0.006)
 	sponge.visible = true
+
+# clamp a cell centre so a rectangle (half-extent hu along the heading, hw across it,
+# in world units) rotated by ang stays fully inside the surface [0,gW]x[0,gH]
+func _clamp_footprint(s: Surface, cx: float, cy: float, ang: float, hu: float, hw: float) -> Vector2:
+	var cs: float = Config.world_cell_size
+	var ca: float = absf(cos(ang))
+	var sa: float = absf(sin(ang))
+	var ex: float = (hu * ca + hw * sa) / cs   # half-extent along cx (s.u)
+	var ey: float = (hu * sa + hw * ca) / cs   # half-extent along cy (s.v)
+	var lox: float = minf(ex, float(s.gW) * 0.5)
+	var loy: float = minf(ey, float(s.gH) * 0.5)
+	return Vector2(clampf(cx, lox, float(s.gW) - lox), clampf(cy, loy, float(s.gH) - loy))
 
 static func _basis_from_x(x: Vector3) -> Basis:
 	x = x.normalized()
@@ -328,14 +342,15 @@ func _build_broom() -> void:
 
 func _show_broom(cx: float, cy: float, ang: float) -> void:
 	var s: Surface = surfaces[0]
-	# no dead zone: the brush follows the cursor right to the counter edge
-	# (cx/cy are already clamped to the surface bounds)
+	# hard-clamp by the (small) brush base footprint so the whole broom stays on the
+	# counter. Base is narrow in the sweep direction (local Z) and wider across it.
+	var p := _clamp_footprint(s, cx, cy, ang, 0.064, 0.256)
 	# broad face (local +Z) turns to face the sweep direction; stands up on the surface
 	var zc: Vector3 = s.u * cos(ang) + s.v * sin(ang)
 	var yc: Vector3 = s.normal
 	var xc: Vector3 = yc.cross(zc).normalized()
 	var sc: float = _BROOM_SCALE
-	broom.transform = Transform3D(Basis(xc, yc, zc).scaled(Vector3(sc, sc, sc)), s.to_world(cx, cy) + s.normal * 0.01)
+	broom.transform = Transform3D(Basis(xc, yc, zc).scaled(Vector3(sc, sc, sc)), s.to_world(p.x, p.y) + s.normal * 0.01)
 	broom.visible = true
 
 func _bottle_part(parent: Node3D, mesh: Mesh, mat: Material, pos: Vector3,
@@ -579,15 +594,23 @@ func _update_heatmap() -> void:
 	for si in surfaces.size():
 		var s: Surface = surfaces[si]
 		var g: PackedFloat32Array = field.grids[si]
-		var nf: PackedFloat32Array = field.no_food[si]
 		var data: PackedByteArray = heat_data[si]
+		var sat: float = maxf(1.0, mx * 0.25)   # saturate early so even faint trails pop
 		for i in g.size():
-			var v: float = minf(1.0, g[i] / mx)
+			var t: float = clampf(g[i] / sat, 0.0, 1.0)
 			var b: int = i * 4
-			data[b + 0] = int(255.0 * minf(1.0, v * 1.6))
-			data[b + 1] = int(255.0 * maxf(0.0, v * 1.6 - 0.6))
-			data[b + 2] = 120 if nf[i] > 0.0 else 0
-			data[b + 3] = int(255.0 * minf(1.0, v * 2.0 + (0.35 if nf[i] > 0.0 else 0.0)))
+			# vivid green -> yellow -> red ramp for trail strength (continuous)
+			var r: float
+			var gg: float
+			if t < 0.5:
+				r = t * 2.0; gg = 1.0
+			else:
+				r = 1.0; gg = 2.0 * (1.0 - t)
+			data[b + 0] = int(255.0 * r)
+			data[b + 1] = int(255.0 * gg)
+			data[b + 2] = 0
+			# smooth alpha: fades continuously from 0 (no hard cutoff), boosted low end
+			data[b + 3] = int(255.0 * pow(t, 0.6) * 0.88)
 		var img := Image.create_from_data(s.gW, s.gH, false, Image.FORMAT_RGBA8, data)
 		heat_tex[si].update(img)
 
