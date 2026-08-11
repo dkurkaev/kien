@@ -7,6 +7,7 @@ const OVERLAY_SHADER := preload("res://shaders/liquid.gdshader")
 const MARBLE_SHADER := preload("res://shaders/marble.gdshader")
 const TILE_SHADER := preload("res://shaders/tile.gdshader")
 const SPONGE_SHADER := preload("res://shaders/sponge.gdshader")
+const WRAP_SHADER := preload("res://shaders/broom_wrap.gdshader")
 
 const SURFACE_COLORS := [Color8(0xcd, 0xbf, 0xa6), Color8(0xe6, 0xdc, 0xc7), Color8(0xd8, 0xcb, 0xb2)]
 const TOOL_TINTS := {
@@ -27,7 +28,17 @@ var camera: Camera3D
 var surfaces: Array          # Array[Surface]
 var cursor_meshes: Array[MeshInstance3D] = []
 var sponge: Node3D           # 3D sponge shown for the cloth tool
-var _sponge_angle := 0.0     # heading (rad, in surface u/v) the sponge points along
+var broom: Node3D            # 3D broom (bamboo brush), stands vertically over the counter
+# smoothed cursor-follow for the sponge/broom (no jerk; only rotates to face movement)
+var _tool_kind := ""         # "cloth" | "broom" | ""
+var _tool_si := 0
+var _tool_cx := 0.0          # target cell (raw cursor)
+var _tool_cy := 0.0
+var _tool_cx_s := 0.0        # smoothed cell
+var _tool_cy_s := 0.0
+var _tool_ang := 0.0         # smoothed heading
+var _tool_ang_t := 0.0       # target heading (from the last move)
+const _BROOM_SCALE := 0.8
 var spray_bottle: Node3D     # held spray bottle, drawn in an on-top overlay world
 var foam: CPUParticles3D     # white foam puff from the nozzle while spraying
 var _spray_vp: SubViewport   # overlay viewport so the bottle never clips the scene
@@ -67,6 +78,7 @@ func _ready() -> void:
 	_build_surfaces()
 	_build_cursor()
 	_build_sponge()
+	_build_broom()
 	_build_spray_bottle()
 
 	hud = Hud.new(tools)
@@ -234,14 +246,103 @@ func _build_sponge() -> void:
 	sponge.visible = false
 	add_child(sponge)
 
-func _show_sponge(si: int, cx: float, cy: float) -> void:
+func _show_sponge(si: int, cx: float, cy: float, ang: float) -> void:
 	var s: Surface = surfaces[si]
-	var a: float = _sponge_angle
+	# keep the whole sponge inside the surface (never past the walls)
+	var mx := minf(5.5, float(s.gW) * 0.5)
+	var my := minf(5.5, float(s.gH) * 0.5)
+	cx = clampf(cx, mx, float(s.gW) - mx)
+	cy = clampf(cy, my, float(s.gH) - my)
 	# long axis follows the wipe heading; short axis and up complete the basis
-	var uu: Vector3 = s.u * cos(a) + s.v * sin(a)
-	var vv: Vector3 = -s.u * sin(a) + s.v * cos(a)
+	var uu: Vector3 = s.u * cos(ang) + s.v * sin(ang)
+	var vv: Vector3 = -s.u * sin(ang) + s.v * cos(ang)
 	sponge.transform = Transform3D(Basis(uu, s.normal, vv), s.to_world(cx, cy) + s.normal * 0.006)
 	sponge.visible = true
+
+static func _basis_from_x(x: Vector3) -> Basis:
+	x = x.normalized()
+	var up := Vector3.UP if absf(x.dot(Vector3.UP)) < 0.95 else Vector3.FORWARD
+	var z := x.cross(up).normalized()
+	var y := z.cross(x).normalized()
+	return Basis(x, y, z)
+
+static func _basis_from_y(y: Vector3) -> Basis:
+	y = y.normalized()
+	var ref := Vector3.FORWARD if absf(y.dot(Vector3.FORWARD)) < 0.95 else Vector3.RIGHT
+	var x := y.cross(ref).normalized()
+	var z := x.cross(y).normalized()
+	return Basis(x, y, z)
+
+func _add_tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
+	st.add_vertex(a); st.add_vertex(b); st.add_vertex(c)
+
+func _build_broom() -> void:
+	# Bamboo hand brush (ref): a flat bamboo paddle with a hole + a row of light
+	# bristles at the bottom. Stands vertically; origin at the bristle tips (surface).
+	# Local: Y up, broad paddle face = +Z (turned to face the sweep direction).
+	broom = Node3D.new()
+	var bamboo := StandardMaterial3D.new()
+	bamboo.albedo_color = Color(0.82, 0.67, 0.40); bamboo.roughness = 0.5
+	var bamboo2 := StandardMaterial3D.new()
+	bamboo2.albedo_color = Color(0.68, 0.53, 0.30); bamboo2.roughness = 0.55
+	var bristle := StandardMaterial3D.new()
+	bristle.albedo_color = Color(0.93, 0.87, 0.68); bristle.roughness = 0.9
+	var dark := StandardMaterial3D.new()
+	dark.albedo_color = Color(0.22, 0.17, 0.12); dark.roughness = 0.7
+
+	# flat paddle handle
+	var paddle := BoxMesh.new(); paddle.size = Vector3(0.54, 0.95, 0.1)
+	var pmi := MeshInstance3D.new(); pmi.mesh = paddle; pmi.material_override = bamboo
+	pmi.position = Vector3(0, 0.86, 0)
+	broom.add_child(pmi)
+	# wider bamboo shoulder where the bristles bind
+	var shoulder := BoxMesh.new(); shoulder.size = Vector3(0.66, 0.16, 0.15)
+	var shmi := MeshInstance3D.new(); shmi.mesh = shoulder; shmi.material_override = bamboo2
+	shmi.position = Vector3(0, 0.45, 0)
+	broom.add_child(shmi)
+	# hanging hole near the top
+	var hole := TorusMesh.new(); hole.inner_radius = 0.032; hole.outer_radius = 0.07
+	var homi := MeshInstance3D.new(); homi.mesh = hole; homi.material_override = dark
+	homi.transform = Transform3D(Basis(Vector3(1, 0, 0), deg_to_rad(90.0)), Vector3(0, 1.2, 0))
+	broom.add_child(homi)
+
+	# bristles: a solid block + frayed strands hanging to the tips at y=0
+	var block := BoxMesh.new(); block.size = Vector3(0.64, 0.26, 0.16)
+	var blmi := MeshInstance3D.new(); blmi.mesh = block; blmi.material_override = bristle
+	blmi.position = Vector3(0, 0.28, 0.0)
+	broom.add_child(blmi)
+	var stb := SurfaceTool.new(); stb.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var box := BoxMesh.new(); box.size = Vector3(1, 1, 1)
+	var nb := 84
+	for i in nb:
+		var t: float = float(i) / float(nb - 1)
+		var x: float = lerp(-0.31, 0.31, t)
+		var ln: float = 0.32 + randf() * 0.08
+		var zoff: float = (float(i % 4) - 1.5) * 0.045
+		var mid := Vector3(x, ln * 0.5 - 0.01, zoff)   # tips at ~y=0, spread in depth
+		var tr := Transform3D(Basis().scaled(Vector3(0.022, ln, 0.022)), mid)
+		stb.append_from(box, 0, tr)
+	stb.generate_normals()
+	var bsmi := MeshInstance3D.new(); bsmi.mesh = stb.commit(); bsmi.material_override = bristle
+	broom.add_child(bsmi)
+
+	broom.visible = false
+	add_child(broom)
+
+func _show_broom(cx: float, cy: float, ang: float) -> void:
+	var s: Surface = surfaces[0]
+	# keep the whole brush inside the counter (never past the walls)
+	var mx := minf(4.5, float(s.gW) * 0.5)
+	var my := minf(4.5, float(s.gH) * 0.5)
+	cx = clampf(cx, mx, float(s.gW) - mx)
+	cy = clampf(cy, my, float(s.gH) - my)
+	# broad face (local +Z) turns to face the sweep direction; stands up on the surface
+	var zc: Vector3 = s.u * cos(ang) + s.v * sin(ang)
+	var yc: Vector3 = s.normal
+	var xc: Vector3 = yc.cross(zc).normalized()
+	var sc: float = _BROOM_SCALE
+	broom.transform = Transform3D(Basis(xc, yc, zc).scaled(Vector3(sc, sc, sc)), s.to_world(cx, cy) + s.normal * 0.01)
+	broom.visible = true
 
 func _bottle_part(parent: Node3D, mesh: Mesh, mat: Material, pos: Vector3,
 		rx := 0.0, ry := 0.0, rz := 0.0, scl := Vector3.ONE) -> void:
@@ -424,14 +525,30 @@ func _build_cursor() -> void:
 # ---------------------------------------------------------------- cursor
 
 func show_cursor(si: int, cx: float, cy: float, tool: String) -> void:
-	hide_cursor()
-	# cloth shows the 3D sponge instead of the flat brush disc
-	if tool == "cloth":
-		_show_sponge(si, cx, cy)
+	# hide the flat disc + bottle; sponge/broom visibility is driven by _tool_kind
+	for mi in cursor_meshes:
+		mi.visible = false
+	if spray_bottle:
+		spray_bottle.visible = false
+	# cloth (any surface) and broom (counter only) follow the cursor as 3D models
+	if tool == "cloth" or (tool == "broom" and si == 0):
+		# snap the smoothing when the tool OR the surface changes, so crossing between
+		# the counter and a wall (different cell spaces) never jumps to a corner
+		if _tool_kind != tool or _tool_si != si:
+			_tool_cx_s = cx; _tool_cy_s = cy; _tool_ang = _tool_ang_t
+		_tool_kind = tool; _tool_si = si; _tool_cx = cx; _tool_cy = cy
 		return
-	var world_r: float = Config.spray_range if tool == "spray" else Config.swipe_width
+	_tool_kind = ""
+	if sponge:
+		sponge.visible = false
+	if broom:
+		broom.visible = false
+	# only the spray tool draws a projected disc (broom must not touch walls at all)
+	if tool != "spray":
+		return
+	var world_r: float = Config.spray_range
 	var range_cells: float = world_r / Config.world_cell_size
-	var tint: Color = TOOL_TINTS[tool]
+	var tint: Color = TOOL_TINTS["spray"]
 	for f in Geom.disc_footprints(layout, si, cx, cy, range_cells):
 		var fs: int = f["s"]
 		var s: Surface = surfaces[fs]
@@ -440,15 +557,17 @@ func show_cursor(si: int, cx: float, cy: float, tool: String) -> void:
 		mi.transform = Transform3D(_surface_basis(s).scaled(Vector3(world_r, world_r, world_r)), pos)
 		(mi.material_override as ShaderMaterial).set_shader_parameter("tint", tint)
 		mi.visible = true
-	# spray also floats the held bottle above the target (disc projection stays)
-	if tool == "spray" and spray_bottle:
+	if spray_bottle:
 		_show_spray_bottle(si, cx, cy)
 
 func hide_cursor() -> void:
+	_tool_kind = ""
 	for mi in cursor_meshes:
 		mi.visible = false
 	if sponge:
 		sponge.visible = false
+	if broom:
+		broom.visible = false
 	if spray_bottle:
 		spray_bottle.visible = false
 
@@ -486,7 +605,7 @@ func _physics_process(delta: float) -> void:
 	ants.update(delta, field, messes)
 	field.step(delta)
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	ants.sync_instances()
 	messes.sync_instances()
 	_update_heatmap()
@@ -495,6 +614,25 @@ func _process(_delta: float) -> void:
 		_spray_overlay.visible = tools.current == "spray"
 	if foam:
 		foam.emitting = _spraying and tools.current == "spray"
+	# a tool switch (keys/HUD, without moving the mouse) must drop the old tool model
+	if _tool_kind != "" and _tool_kind != tools.current:
+		_tool_kind = ""
+	if sponge and tools.current != "cloth":
+		sponge.visible = false
+	if broom and tools.current != "broom":
+		broom.visible = false
+	# sponge/broom follow the cursor smoothly (no jerk) and only rotate to face the
+	# movement heading. Position + angle are eased toward their targets every frame.
+	if _tool_kind == "cloth" or _tool_kind == "broom":
+		var kp: float = clampf(delta * 20.0, 0.0, 1.0)
+		var ka: float = clampf(delta * 14.0, 0.0, 1.0)
+		_tool_cx_s = lerp(_tool_cx_s, _tool_cx, kp)
+		_tool_cy_s = lerp(_tool_cy_s, _tool_cy, kp)
+		_tool_ang = lerp_angle(_tool_ang, _tool_ang_t, ka)
+		if _tool_kind == "cloth":
+			_show_sponge(_tool_si, _tool_cx_s, _tool_cy_s, _tool_ang)
+		else:
+			_show_broom(_tool_cx_s, _tool_cy_s, _tool_ang)
 	if hud:
 		hud.set_stats(ants.alive_count(), messes.crumbs.alive_count(), Engine.get_frames_per_second())
 
@@ -562,13 +700,11 @@ func _on_move(screen_pos: Vector2) -> void:
 	var world_dist: float = prev_world.distance_to(cur["world"])
 	var speed: float = world_dist / dt
 	var fast: bool = speed > Config.swipe_fast_threshold
-	# turn the sponge to face the wipe direction (in this surface's cell space)
+	# update the heading the sponge/broom rotate toward (needs a real move, not jitter)
 	var mdx: float = cur["cx"] - prev_cx
 	var mdy: float = cur["cy"] - prev_cy
-	if mdx * mdx + mdy * mdy > 0.02:
-		_sponge_angle = atan2(mdy, mdx)
-		if tools.current == "cloth":
-			show_cursor(cur["si"], cur["cx"], cur["cy"], "cloth")
+	if mdx * mdx + mdy * mdy > 0.2:
+		_tool_ang_t = atan2(mdy, mdx)
 	interactions.apply_segment(tools.current, cur["si"], prev_cx, prev_cy, cur["cx"], cur["cy"], fast, speed)
 
 func _set_last(p: Dictionary) -> void:
